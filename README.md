@@ -66,6 +66,7 @@
 1. 浏览器安装 [Tampermonkey](https://www.tampermonkey.net/) 扩展。
 2. 安装脚本（任选其一）：
    - **方式 A（推荐）**：打开 [GreasyFork 脚本页](https://greasyfork.org/zh-CN/scripts/580936) → 点「**安装此脚本**」，后续 GreasyFork 自动推送更新。
+     > GreasyFork 已接入本仓库 `main` 分支的自动同步：每次 push 经 GitHub Webhook 触发，GreasyFork 自动拉取最新脚本。
    - **方式 B**：打开 Tampermonkey → **管理面板 → 实用工具 → 导入**，选择本仓库的 `jd-auto-review.user.js`；或新建脚本把全文粘贴保存。
 3. 安装后**务必先填配置**（至少 `API_KEY`，见[配置说明](#配置说明)），再确认脚本已启用。
 
