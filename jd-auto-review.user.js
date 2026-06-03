@@ -16,10 +16,6 @@
 // @connect      360buyimg.com
 // @connect      img30.360buyimg.com
 // @connect      storage.360buyimg.com
-// @connect      192.168.2.20
-// @connect      api.deepseek.com
-// @connect      api.openai.com
-// @connect      open.bigmodel.cn
 // @connect      *
 // ==/UserScript==
 
