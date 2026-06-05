@@ -7,6 +7,8 @@
 // @license      MIT
 // @homepageURL  https://github.com/charmingYouYou/JDAIAutoComment
 // @supportURL   https://github.com/charmingYouYou/JDAIAutoComment/issues
+// @icon         https://www.jd.com/favicon.ico
+// @noframes
 // @match        https://club.jd.com/myJdcomments/orderVoucher*
 // @match        https://club.jd.com/myJdcomments/saveCommentSuccess*
 // @match        https://club.jd.com/myJdcomments/myJdcomment.action*
