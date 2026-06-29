@@ -136,6 +136,41 @@
         });
     }
 
+    // 强制单标签页导航：把点击目标及其祖先链上的 <a>/<form> 的 target 设为 _self，
+    // 阻止京东 target="_blank" 链接新开标签页。el 为原生 DOM 元素。
+    function forceSameTabNav(el) {
+        let node = el;
+        while (node && node !== document.body) {
+            const tag = node.tagName;
+            if (tag === 'A' || tag === 'FORM') {
+                node.setAttribute('target', '_self');
+            }
+            node = node.parentNode;
+        }
+    }
+
+    // 点击期间临时把 window.open 改成"原地跳转"，兜住京东 onclick 里
+    // window.open(...) 程序化开新页。fn 跑完立即还原，并再加 500ms 保险还原（防延迟调用 / finally 漏跑）。
+    function withOpenGuard(fn) {
+        const orig = window.open;
+        let restored = false;
+        const restore = function() {
+            if (restored) return;
+            restored = true;
+            window.open = orig;
+        };
+        window.open = function(url) {
+            try { if (url) location.href = url; } catch (e) {}
+            return null;
+        };
+        try {
+            fn();
+        } finally {
+            restore();
+            setTimeout(restore, 500);
+        }
+    }
+
     // 通用：倒计时后自动点击目标元素。getEl 每次回调时重新求值，确保拿到最新 DOM。
     // 点击前是一个暂停边界；找不到目标则停止（onNotFound 可定制收尾，如结束循环）。
     function autoClickAfter(getEl, label, delay, onNotFound) {
