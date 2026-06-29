@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         京东自动评价（大模型版·全自动闭环）
 // @namespace    https://github.com/charmingYouYou/JDAIAutoComment
-// @version      8.5
+// @version      8.6
 // @description  一个「开始/暂停」按钮控制的全自动评价闭环：评价→自动配图（抓商品晒单图随机上传）→发表→返回列表→进入下一单，循环至列表清空。开始=从当前步骤继续；暂停=当前步骤完成后停止。支持接入各类大模型（DeepSeek/OpenAI/GLM等）。
 // @author       charmingYouYou
 // @license      MIT
@@ -136,6 +136,41 @@
         });
     }
 
+    // 强制单标签页导航：把点击目标及其祖先链上的 <a>/<form> 的 target 设为 _self，
+    // 阻止京东 target="_blank" 链接新开标签页。el 为原生 DOM 元素。
+    function forceSameTabNav(el) {
+        let node = el;
+        while (node && node !== document.body) {
+            const tag = node.tagName;
+            if (tag === 'A' || tag === 'FORM') {
+                node.setAttribute('target', '_self');
+            }
+            node = node.parentNode;
+        }
+    }
+
+    // 点击期间临时把 window.open 改成"原地跳转"，兜住京东 onclick 里
+    // window.open(...) 程序化开新页。fn 跑完立即还原，并再加 500ms 保险还原（防延迟调用 / finally 漏跑）。
+    function withOpenGuard(fn) {
+        const orig = window.open;
+        let restored = false;
+        const restore = function() {
+            if (restored) return;
+            restored = true;
+            window.open = orig;
+        };
+        window.open = function(url) {
+            try { if (url) location.href = url; } catch (e) {}
+            return null;
+        };
+        try {
+            fn();
+        } finally {
+            restore();
+            setTimeout(restore, 500);
+        }
+    }
+
     // 通用：倒计时后自动点击目标元素。getEl 每次回调时重新求值，确保拿到最新 DOM。
     // 点击前是一个暂停边界；找不到目标则停止（onNotFound 可定制收尾，如结束循环）。
     function autoClickAfter(getEl, label, delay, onNotFound) {
@@ -156,7 +191,15 @@
             const $el = getEl();
             if ($el && $el.length > 0) {
                 updateStatus(`${label}：已自动点击 ✅`, 'green');
-                $el[0].click();
+                // 单标签页导航：点击前中和 target="_blank"，并接管 window.open 兜底程序化开新页。
+                // 中和失败则退回普通点击，最坏情况等同现状（开新标签页），不会更差。
+                try {
+                    forceSameTabNav($el[0]);
+                    withOpenGuard(function() { $el[0].click(); });
+                } catch (e) {
+                    updateStatus('单标签导航中和失败，退回普通点击：' + e, 'red');
+                    $el[0].click();
+                }
             } else {
                 updateStatus(`${label}：未找到目标元素，流程已停止。`, 'red');
                 if (onNotFound) onNotFound();
