@@ -102,18 +102,18 @@
 
 ### 运行
 
-1. 打开 **我的评价**：`https://club.jd.com/myJdcomments/myJdcomment.action`。
+1. 打开新版**评价中心**：`https://comment.m.jd.com/pc-static/center`（旧版 `myJdcomment.action` 仍可使用）。
 2. 页面右侧出现「🤖 AI 自动评价助手」浮窗，点击 **开始**。
 3. 脚本随即自动执行闭环，全程无需干预：
 
    | 阶段 | 页面 | 脚本动作 |
    |------|------|----------|
-   | ① 进单 | 评价列表页 | 点击第一条待评订单的「评价」，进入评价页 |
+   | ① 进单 | 评价中心 | 点击第一件待评商品的「去评价」，进入发布页 |
    | ② 写评价 | 评价页 | 逐个商品调大模型生成评价并回填（失败用兜底文案） |
    | ③ 打星 | 评价页 | 统一打五星 |
    | ④ 配图 | 评价页 | 按 sku 抓该商品买家晒单图，随机取 N 张上传（`ENABLE_IMAGE=false` 可关闭） |
-   | ⑤ 发表 | 评价页 | 等图片上传完成后点「发表」 |
-   | ⑥ 返回 | 成功页 | 点「返回待评价列表 >」回到列表页 |
+   | ⑤ 发布 | 发布页 | 等图片上传完成后点「发布」 |
+   | ⑥ 返回 | 发布页成功状态 | 点「返回待评价列表」回到评价中心 |
    | ↻ 循环 | — | 回到 ①，处理下一单 |
 
 4. **待评列表清空后自动停止**，浮窗提示「循环结束」，按钮复位为「开始」。
@@ -131,17 +131,17 @@
 ## 工作原理
 
 ### 1. 评价生成
-逐个可见商品（`.f-textarea textarea`）取商品名（`.p-name`），调用 `API_URL` 生成评价并回填，触发 `input`/`change` 事件让京东识别。
+逐个可见商品取商品名，调用 `API_URL` 生成评价并回填。新版使用 `.rate-comment-content-textarea`，通过原生 value setter 和 `input`/`change` 事件同步 React 状态；旧版继续使用 `.f-textarea textarea`。
 
 ### 2. 自动配图（关键设计）
-- **图源**：不抓商品详情页（详情页对自动化访问有风控、且规格/晒单区多为 JS 异步渲染）。改用与评价页**同域**的晒单图接口：
+- **图源**：优先通过 `GM_xmlhttpRequest` 调用晒单图接口：
   ```
   https://club.jd.com/discussion/getProductPageImageCommentList.action?productId=<sku>&isShadowSku=0&page=1&pageSize=10
   ```
-  返回 JSON，`imgComments.imgList[].imageUrl` 即买家晒单图（`*.360buyimg.com/shaidan/...jpg`）。同域、无风控、结构化。
-- **skuId 来源**：评价页 `.p-name a` 的 href（`//item.jd.com/<sku>.html`）。
-- **上传**：`.btn-upload` 底层是 **plupload（html5 runtime）** 的原生 `<input type="file" multiple>`。脚本用 `GM_xmlhttpRequest` 把图片抓成 `Blob` → 构造 `File` → 经 `DataTransfer` 写入 `input.files` → 派发 `change` 事件触发 plupload 上传，**绕过系统文件选择框**。
-- **sku ↔ input 映射**：单商品单直接用唯一 input；多商品单按 `.btn-upload`（`#image-upload-<sku>`）与各 input 的几何重叠定位。
+  返回 JSON 时，`imgComments.imgList[].imageUrl` 是晒单图。接口无图或不可用时，新版使用当前商品卡片图片配图。
+- **skuId 来源**：新版发布页 URL 的 `skuId` 参数；旧版从 `.p-name a` 的商品链接提取。
+- **上传**：图片下载为 `Blob` 并转为 JPEG `File`，通过 `DataTransfer` 写入文件 input，派发 `change` 事件。新版使用 `.uploadAddInput`，等待 `.filePreviewBox` 的上传蒙层消失；旧版继续使用 plupload input。
+- **sku ↔ input 映射**：新版按发布页的商品卡片顺序对应 URL 中的 SKU；旧版按上传按钮与 input 的几何位置对应。
 
 ### 3. 开始 / 暂停状态机
 - `running`（`localStorage` 持久化）：循环是否激活，决定按钮显示「暂停」还是「开始」，并驱动各页面加载后自动续跑。
@@ -163,18 +163,22 @@
 | 评价页 | 文案「发表」的 `a.btn-submit` | 发表 |
 | 成功页 `saveCommentSuccess.action` | 文案含「返回待评价列表」的元素 | 返回列表 |
 | 配图接口 | `getProductPageImageCommentList.action?productId=<sku>` | 取晒单图 |
+| 新版列表页 `/pc-static/center` | `.wait-rate-card .rate-btn`（文案「去评价」） | 进入下一件商品 |
+| 新版发布页 `/pc-static/publish` | `.rate-comment-content-textarea`、`.rate-comment-goods-title` | 商品名 / 评价输入框 |
+| 新版发布页 | `.scoreBox-conter-score-star-box-item`、`.uploadAddInput` | 五星 / 配图 |
+| 新版发布页 | `.rate-publish-submit-button`、`.rate-finish-return` | 发布 / 返回列表 |
 
 ---
 
 ## 已知限制与风险
 
-- **详情页风控**：直接自动访问 `item.jd.com` 会被风控拦截（`pc-frequent-pro` 403）。本脚本因此改用同域晒单接口取图，**不访问详情页**。
-- **多商品订单的 sku↔input 映射**：单商品单已验证；多商品单按几何重叠匹配，尚未充分验证，首次遇到请留意是否配错图。
-- **上传完成检测**：靠检测已上传缩略图（`img[src*="imageUpload"]`）计数，若选择器未匹配上，会等满 `UPLOAD_WAIT_TIMEOUT` 再发表（图大概率已传完），不会误发空图但会偏慢。
-- **试用装 / 赠品 / 下架品**：可能无晒单图，脚本会跳过配图直接发表。
+- **晒单接口**：当前环境直接请求接口返回“系统繁忙”，无法保证每件商品都能获取晒单图。新版会改用页面显示的商品图片；图片仍不可用时跳过配图。
+- **多商品订单的 sku↔input 映射**：新版按 URL 中 SKU 与卡片的顺序映射，尚未通过真实多商品发布验证；首次遇到请留意是否配错图。
+- **上传完成检测**：新版等待上传蒙层消失，超时或失败时移除未完成图片后继续发布；旧版仍按缩略图计数。
+- **试用装 / 赠品 / 下架品**：可能无可用图片，脚本会跳过配图直接发布。
 - **接口 / DOM 变更**：京东随时可能改版，相关选择器与接口失效时需按上表更新。
 - **合规与账号风险**：见免责声明。
-- **标签页**：v8.6 起整条闭环在单个标签页内完成（跳转前中和 `target="_blank"`、接管 `window.open`），挂机批量评价不再累积标签页。但历史运行已堆出的旧标签页需手动关闭一次——浏览器禁止脚本关闭非脚本打开的标签页，无法代为回收。
+- **标签页**：新版「去评价」会调用 `window.open`。脚本在点击期间临时接管页面的 `window.open`，让循环在当前标签页继续。
 
 ---
 
@@ -182,6 +186,7 @@
 
 | 版本 | 主要变化 |
 |------|----------|
+| v9.0 | 适配新版评价中心与发布页：页面匹配、去评价/发布按钮、React 输入框、图片上传状态和成功返回 |
 | v8 | 新增自动配图：同域晒单接口取图 + plupload 文件注入上传，串接进发表前 |
 | v7 | 「开始 / 暂停」合并为单按钮两态，统一所有页面；移除独立「恢复」「手动生成」 |
 | v6 | 引入开始 / 暂停 / 恢复三态控制 |
