@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         京东自动评价（大模型版·全自动闭环）
 // @namespace    https://github.com/charmingYouYou/JDAIAutoComment
-// @version      8.6
+// @version      9.0
 // @description  一个「开始/暂停」按钮控制的全自动评价闭环：评价→自动配图（抓商品晒单图随机上传）→发表→返回列表→进入下一单，循环至列表清空。开始=从当前步骤继续；暂停=当前步骤完成后停止。支持接入各类大模型（DeepSeek/OpenAI/GLM等）。
 // @author       charmingYouYou
 // @license      MIT
@@ -12,8 +12,11 @@
 // @match        https://club.jd.com/myJdcomments/orderVoucher*
 // @match        https://club.jd.com/myJdcomments/saveCommentSuccess*
 // @match        https://club.jd.com/myJdcomments/myJdcomment.action*
-// @require      http://libs.baidu.com/jquery/1.11.1/jquery.min.js
+// @match        https://comment.m.jd.com/pc-static/center*
+// @match        https://comment.m.jd.com/pc-static/publish*
+// @require      https://code.jquery.com/jquery-3.7.1.min.js
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      club.jd.com
 // @connect      360buyimg.com
 // @connect      img30.360buyimg.com
@@ -152,15 +155,16 @@
     // 点击期间临时把 window.open 改成"原地跳转"，兜住京东 onclick 里
     // window.open(...) 程序化开新页。fn 跑完立即还原，并再加 500ms 保险还原（防延迟调用 / finally 漏跑）。
     function withOpenGuard(fn) {
-        const orig = window.open;
+        const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+        const orig = pageWindow.open;
         let restored = false;
         const restore = function() {
             if (restored) return;
             restored = true;
-            window.open = orig;
+            pageWindow.open = orig;
         };
-        window.open = function(url) {
-            try { if (url) location.href = url; } catch (e) {}
+        pageWindow.open = function(url) {
+            try { if (url) pageWindow.location.href = url; } catch (e) {}
             return null;
         };
         try {
@@ -261,6 +265,11 @@
 
     // 解析"发表"按钮：优先精确文案"发表"，找不到再退化为包含"发表"（兼容"发表评价"）。该页发表按钮唯一，取 first。
     function resolvePublishBtn() {
+        if (location.hostname === 'comment.m.jd.com') {
+            return $('.rate-publish-submit-button:visible').not('.disabled').filter(function() {
+                return $(this).text().trim() === '发布';
+            }).first();
+        }
         let $btn = $clickableByText('发表', false);
         if ($btn.length === 0) $btn = $clickableByText('发表', true);
         return $btn.first();
@@ -274,7 +283,22 @@
     // 发表步骤（含暂停边界）
     function publishStep() {
         if (haltIfPaused(publishStep)) return;
+        if (location.hostname === 'comment.m.jd.com') watchModernPublishResult();
         autoClickAfter(resolvePublishBtn, '自动发表评价');
+    }
+
+    function watchModernPublishResult() {
+        const start = Date.now();
+        const timer = setInterval(function() {
+            if (document.querySelector('.rate-finish-return')) {
+                clearInterval(timer);
+                if (running) successReturnStep();
+            } else if (Date.now() - start > 30000) {
+                clearInterval(timer);
+                setRunning(false);
+                updateStatus('发布后未检测到成功页面，已暂停；请检查页面提示。', 'red');
+            }
+        }, 500);
     }
 
     // 洗牌取前 n 个
@@ -291,21 +315,30 @@
     function fetchShaidanImages(sku) {
         const api = 'https://club.jd.com/discussion/getProductPageImageCommentList.action?productId=' +
                     sku + '&isShadowSku=0&page=1&pageSize=10';
-        return fetch(api, { credentials: 'include' })
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                return (d && d.imgComments && d.imgComments.imgList)
-                    ? d.imgComments.imgList.map(function(x) { return x.imageUrl; }).filter(Boolean)
-                    : [];
-            })
-            .catch(function() { return []; });
+        // 新版页面在 comment.m.jd.com，必须通过 GM 请求跨域读取晒单接口。
+        function requestJson(url) {
+            return new Promise(function(resolve) {
+                GM_xmlhttpRequest({
+                    method: 'GET', url: url, timeout: 10000,
+                    onload: function(r) {
+                        try { resolve(JSON.parse(r.responseText)); } catch (e) { resolve(null); }
+                    },
+                    onerror: function() { resolve(null); },
+                    ontimeout: function() { resolve(null); }
+                });
+            });
+        }
+        return requestJson(api).then(function(d) {
+            const images = d && d.imgComments && d.imgComments.imgList;
+            return Array.isArray(images) ? images.map(function(x) { return x.imageUrl; }).filter(Boolean) : [];
+        });
     }
 
     // 跨域抓图为 Blob（图片在 360buyimg.com，需 GM_xmlhttpRequest + @connect）
     function fetchImageBlob(url) {
         return new Promise(function(resolve, reject) {
             GM_xmlhttpRequest({
-                method: 'GET', url: url, responseType: 'blob',
+                method: 'GET', url: url, responseType: 'blob', timeout: 10000,
                 onload: function(r) {
                     (r.status >= 200 && r.status < 300 && r.response) ? resolve(r.response) : reject('HTTP ' + r.status);
                 },
@@ -387,10 +420,24 @@
         return products;
     }
 
+    // 新版发布页的 SKU 在 URL 中，商品卡片、上传 input 按相同顺序渲染。
+    function collectModernProducts() {
+        const skus = (new URLSearchParams(location.search).get('skuId') || '').split(',');
+        return Array.prototype.slice.call(document.querySelectorAll('.rate-comment')).map(function(card, index) {
+            const image = card.querySelector('.rate-comment-goods-imageBox img');
+            return { sku: skus[index], input: card.querySelector('.uploadAddInput'),
+                fallbackUrl: image && image.src.replace(/\/s\d+x\d+_jfs\//, '/jfs/') };
+        }).filter(function(product) { return /^\d+$/.test(product.sku || '') && product.input; });
+    }
+
     // 单个商品：抓晒单图 → 随机取 N 张 → 下载为 File → 注入上传。返回成功注入的张数。
     function uploadForProduct(p) {
         updateStatus('配图：抓取 sku ' + p.sku + ' 晒单图...', 'blue');
-        return fetchShaidanImages(p.sku).then(function(urls) {
+        return fetchShaidanImages(p.sku).catch(function() { return []; }).then(function(urls) {
+            if (!urls.length && p.fallbackUrl) {
+                updateStatus('晒单接口无图，使用当前商品图片配图。', 'blue');
+                urls = [p.fallbackUrl];
+            }
             if (!urls.length) { updateStatus('sku ' + p.sku + ' 无晒单图，跳过配图', '#e4393c'); return 0; }
             const picks = pickRandom(urls, IMG_PER_PRODUCT);
             const tasks = picks.map(function(u, i) {
@@ -402,19 +449,27 @@
             });
             return Promise.all(tasks).then(function(files) {
                 files = files.filter(Boolean);
-                if (!files.length || !p.input) {
-                    updateStatus('sku ' + p.sku + ' 配图未完成(input=' + (!!p.input) + ', files=' + files.length + ')', '#e4393c');
-                    return 0;
-                }
-                injectFiles(p.input, files);
-                updateStatus('sku ' + p.sku + ' 已注入 ' + files.length + ' 张图，上传中...', 'green');
-                return files.length;
+                const fallback = !files.length && p.fallbackUrl && urls[0] !== p.fallbackUrl
+                    ? fetchImageBlob(p.fallbackUrl.replace(/\.dpg(\?|$)/, '$1'))
+                        .then(function(blob) { return blobToJpegFile(blob, 'product_' + p.sku + '.jpg'); })
+                        .then(function(file) { return [file]; }).catch(function() { return []; })
+                    : Promise.resolve(files);
+                return fallback.then(function(ready) {
+                    if (!ready.length || !p.input) {
+                        updateStatus('sku ' + p.sku + ' 配图未完成，跳过配图。', '#e4393c');
+                        return 0;
+                    }
+                    injectFiles(p.input, ready);
+                    updateStatus('sku ' + p.sku + ' 已注入 ' + ready.length + ' 张图，上传中...', 'green');
+                    return ready.length;
+                });
             });
         });
     }
 
     // 等待上传完成：检测页面出现已上传图（i.imageUpload）数 ≥ 期望张数；到点即返回，避免卡死
     function waitUploads(min, timeout) {
+        if (location.hostname === 'comment.m.jd.com') return waitModernUploads(min, timeout);
         return new Promise(function(resolve) {
             const start = Date.now();
             const iv = setInterval(function() {
@@ -424,10 +479,29 @@
         });
     }
 
+    // 新版组件用 .filePreviewStateMask 显示“上传中/上传失败”；成功图片无蒙层。
+    function waitModernUploads(min, timeout) {
+        return new Promise(function(resolve) {
+            const start = Date.now();
+            const timer = setInterval(function() {
+                const boxes = Array.prototype.slice.call(document.querySelectorAll('.rate-comment .filePreviewBox'));
+                const pending = boxes.filter(function(box) { return !!box.querySelector('.filePreviewStateMask'); });
+                if (boxes.length >= min && pending.length === 0 || Date.now() - start >= timeout) {
+                    clearInterval(timer);
+                    pending.forEach(function(box) {
+                        const close = box.querySelector('.rateUploadItemClose');
+                        if (close) close.click();
+                    });
+                    resolve(boxes.length - pending.length);
+                }
+            }, 500);
+        });
+    }
+
     // 配图主流程：逐商品配图 → 等上传 → 发表。任何异常都跳过配图直接发表，不阻断闭环。
     function uploadImagesThenPublish() {
         if (haltIfPaused(uploadImagesThenPublish)) return;
-        const products = collectProducts();
+        const products = location.hostname === 'comment.m.jd.com' ? collectModernProducts() : collectProducts();
         if (!products.length) { publishStep(); return; }
 
         let expected = 0;
@@ -516,6 +590,79 @@
         processNextItem(0);
     }
 
+    // React 受控文本框必须调用原生 setter 才能让页面状态同步。
+    function setModernTextarea(textarea, value) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(textarea, value);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function processModernItem(index) {
+        const cards = Array.prototype.slice.call(document.querySelectorAll('.rate-comment'))
+            .filter(function(card) { return !!card.querySelector('.rate-comment-content-textarea'); });
+        if (index >= cards.length) {
+            document.querySelectorAll('.scoreBox-conter-score-star-box').forEach(function(box) {
+                const stars = box.querySelectorAll('.scoreBox-conter-score-star-box-item');
+                if (stars.length) stars[stars.length - 1].click();
+            });
+            if (ENABLE_IMAGE) uploadImagesThenPublish(); else publishStep();
+            return;
+        }
+        if (haltIfPaused(function() { processModernItem(index); })) return;
+        const card = cards[index];
+        const name = (card.querySelector('.rate-comment-goods-title') || {}).textContent || '未知商品';
+        updateStatus('生成评价 ' + (index + 1) + '/' + cards.length + '：' + name.slice(0, 18), 'blue');
+        generateProductReview(name, function(review) {
+            const textarea = card.querySelector('.rate-comment-content-textarea');
+            if (!textarea) {
+                setRunning(false);
+                updateStatus('评价输入框在生成过程中消失，已暂停。', 'red');
+                return;
+            }
+            setModernTextarea(textarea, review);
+            setTimeout(function() { processModernItem(index + 1); }, 1500);
+        }, function(error) {
+            setRunning(false);
+            resumeAction = function() { processModernItem(index); };
+            updateStatus('第 ' + (index + 1) + ' 件商品生成失败：' + error + '。已暂停。', 'red');
+        });
+    }
+
+    function startModernReviewProcess(retries) {
+        retries = retries || 0;
+        if (!checkConfig()) return;
+        if (document.querySelector('.rate-finish-return')) { successReturnStep(); return; }
+        const count = document.querySelectorAll('.rate-comment-content-textarea').length;
+        if (!count) {
+            if (retries < 5) {
+                setTimeout(function() { if (running) startModernReviewProcess(retries + 1); }, 1000);
+                return;
+            }
+            setRunning(false);
+            updateStatus('新版发布页未找到评价输入框，已暂停。', 'red');
+            return;
+        }
+        updateStatus('检测到 ' + count + ' 个新版评价输入框。', 'blue');
+        processModernItem(0);
+    }
+
+    function runModernListStep(retries) {
+        retries = retries || 0;
+        autoClickAfter(function() {
+            return $('.wait-rate-card .rate-btn:visible').filter(function() {
+                return $(this).clone().children().remove().end().text().trim() === '去评价';
+            }).first();
+        }, '进入下一件商品评价', AUTO_CLICK_DELAY, function() {
+            if (retries < 5) {
+                setTimeout(function() { if (running) runModernListStep(retries + 1); }, 1000);
+                return;
+            }
+            setRunning(false);
+            updateStatus('未找到待评价商品，循环结束。', 'green');
+        });
+    }
+
     // 我的评价列表页步骤：点击 .operate 下"评价"按钮（第一条待评价订单）。列表为空 → 结束循环。
     function runListStep() {
         autoClickAfter(function() {
@@ -539,6 +686,7 @@
     // 评价成功页步骤：点击"返回待评价列表 >"
     function successReturnStep() {
         autoClickAfter(function() {
+            if (location.hostname === 'comment.m.jd.com') return $('.rate-finish-return:visible').first();
             return $clickableByText('返回待评价列表', true).first();
         }, '返回待评价列表');
     }
@@ -551,7 +699,11 @@
 
         const path = location.pathname;
 
-        if (path.indexOf('/saveCommentSuccess') !== -1) {
+        if (location.hostname === 'comment.m.jd.com' && path.indexOf('/pc-static/center') !== -1) {
+            currentStep = runModernListStep;
+        } else if (location.hostname === 'comment.m.jd.com' && path.indexOf('/pc-static/publish') !== -1) {
+            currentStep = startModernReviewProcess;
+        } else if (path.indexOf('/saveCommentSuccess') !== -1) {
             currentStep = successReturnStep;
         } else if (path.indexOf('/myJdcomment.action') !== -1) {
             currentStep = runListStep;
@@ -562,10 +714,10 @@
 
         if (running) {
             // 循环中：自动执行本页步骤。评价页留 2.5s 等 DOM 就绪，其余步骤自带倒计时。
-            if (currentStep === startReviewProcess) {
+            if (currentStep === startReviewProcess || currentStep === startModernReviewProcess) {
                 if (!checkConfig()) return;
                 updateStatus('循环中，2秒后开始本单评价...', 'blue');
-                setTimeout(function() { if (running) startReviewProcess(); }, 2500);
+                setTimeout(function() { if (running) currentStep(); }, 2500);
             } else {
                 currentStep();
             }
