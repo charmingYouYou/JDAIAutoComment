@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         京东自动评价（大模型版·全自动闭环）
 // @namespace    https://github.com/charmingYouYou/JDAIAutoComment
-// @version      8.6
+// @version      9.0
 // @description  一个「开始/暂停」按钮控制的全自动评价闭环：评价→自动配图（抓商品晒单图随机上传）→发表→返回列表→进入下一单，循环至列表清空。开始=从当前步骤继续；暂停=当前步骤完成后停止。支持接入各类大模型（DeepSeek/OpenAI/GLM等）。
 // @author       charmingYouYou
 // @license      MIT
@@ -12,8 +12,11 @@
 // @match        https://club.jd.com/myJdcomments/orderVoucher*
 // @match        https://club.jd.com/myJdcomments/saveCommentSuccess*
 // @match        https://club.jd.com/myJdcomments/myJdcomment.action*
+// @match        https://comment.m.jd.com/pc-static/center*
+// @match        https://comment.m.jd.com/pc-static/publish*
 // @require      http://libs.baidu.com/jquery/1.11.1/jquery.min.js
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      club.jd.com
 // @connect      360buyimg.com
 // @connect      img30.360buyimg.com
@@ -54,6 +57,9 @@
     // currentStep：本页加载时算出的"当前步骤"，点「开始」时执行它。
     // resumeAction：暂停停在步骤边界时记下的断点续作，点「开始」优先执行它。
     const LOOP_KEY = 'JD_AI_LOOP_RUNNING';
+    // 旧版 club.jd.com 与新版 comment.m.jd.com（每页仅一个商品）评价页的输入框 / 商品名
+    const TEXTAREA_SEL = '.f-textarea textarea, textarea.rate-comment-content-textarea';
+    const NAME_SEL = '.p-name, .rate-comment-goods-title';
     let running = false;
     let currentStep = null;
     let resumeAction = null;
@@ -150,16 +156,18 @@
     }
 
     // 点击期间临时把 window.open 改成"原地跳转"，兜住京东 onclick 里
-    // window.open(...) 程序化开新页。fn 跑完立即还原，并再加 500ms 保险还原（防延迟调用 / finally 漏跑）。
+    // window.open(...) 程序化开新页（如新版「去评价」；脚本点击无用户手势，新开页还会被弹窗拦截）。
+    // 须改 unsafeWindow：有 @grant 时脚本的 window 是沙箱对象，改它拦不到页面自己的 window.open。
+    // fn 跑完立即还原，并再加 500ms 保险还原（防延迟调用 / finally 漏跑）。
     function withOpenGuard(fn) {
-        const orig = window.open;
+        const orig = unsafeWindow.open;
         let restored = false;
         const restore = function() {
             if (restored) return;
             restored = true;
-            window.open = orig;
+            unsafeWindow.open = orig;
         };
-        window.open = function(url) {
+        unsafeWindow.open = function(url) {
             try { if (url) location.href = url; } catch (e) {}
             return null;
         };
@@ -259,9 +267,10 @@
         });
     }
 
-    // 解析"发表"按钮：优先精确文案"发表"，找不到再退化为包含"发表"（兼容"发表评价"）。该页发表按钮唯一，取 first。
+    // 解析"发表"按钮：新版为「发布」按钮；旧版优先精确文案"发表"，找不到再退化为包含"发表"（兼容"发表评价"）。该页发表按钮唯一，取 first。
     function resolvePublishBtn() {
-        let $btn = $clickableByText('发表', false);
+        let $btn = $('.rate-publish-submit-button').filter(':visible');
+        if ($btn.length === 0) $btn = $clickableByText('发表', false);
         if ($btn.length === 0) $btn = $clickableByText('发表', true);
         return $btn.first();
     }
@@ -373,8 +382,10 @@
         return best;
     }
 
-    // 收集本页所有商品（sku + 对应 file input），按 sku 去重
+    // 收集本页所有商品（sku + 对应 file input），按 sku 去重。新版评价页单商品，sku 直接取 URL 的 skuId。
     function collectProducts() {
+        const urlSku = new URLSearchParams(location.search).get('skuId');
+        if (urlSku) return [{ sku: urlSku, input: findFileInputForSku(urlSku) }];
         const seen = {}, products = [];
         document.querySelectorAll('.p-name a').forEach(function(a) {
             const href = a.getAttribute('href') || '';
@@ -413,12 +424,14 @@
         });
     }
 
-    // 等待上传完成：检测页面出现已上传图（i.imageUpload）数 ≥ 期望张数；到点即返回，避免卡死
+    // 等待上传完成：已上传图数 ≥ 期望张数；到点即返回，避免卡死。
+    // 旧版已传图为 img[src*=imageUpload]；新版每张图一个 .filePreviewBox，上传中带「上传中...」遮罩 .filePreviewStateMask。
     function waitUploads(min, timeout) {
         return new Promise(function(resolve) {
             const start = Date.now();
             const iv = setInterval(function() {
-                const n = document.querySelectorAll('img[src*="imageUpload"]').length;
+                const n = document.querySelectorAll('img[src*="imageUpload"], .filePreviewBox').length -
+                          document.querySelectorAll('.filePreviewStateMask').length;
                 if (n >= min || (Date.now() - start) > timeout) { clearInterval(iv); resolve(n); }
             }, 600);
         });
@@ -455,8 +468,8 @@
 
     // 5. 递归处理每一个可见的商品
     function processNextItem(index) {
-        let $textareas = $('.f-textarea textarea').filter(':visible');
-        let $names = $('.p-name').filter(':visible');
+        let $textareas = $(TEXTAREA_SEL).filter(':visible');
+        let $names = $(NAME_SEL).filter(':visible');
 
         if (index >= $textareas.length) {
             $('.star5:visible').click(); // 统一打五星
@@ -483,8 +496,9 @@
         generateProductReview(productName,
             function(review) {
                 let $currentTarget = $textareas.eq(index);
-                $currentTarget.val(review);
                 if ($currentTarget.length > 0) {
+                    // 新版是 React 受控 textarea：.val() 赋值会被 React 值追踪吞掉不触发 onChange，须走原生 setter
+                    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call($currentTarget[0], review);
                     $currentTarget[0].dispatchEvent(new Event('input', { bubbles: true }));
                     $currentTarget[0].dispatchEvent(new Event('change', { bubbles: true }));
                 }
@@ -506,7 +520,7 @@
     function startReviewProcess() {
         if (!checkConfig()) return;
 
-        let $textareas = $('.f-textarea textarea').filter(':visible');
+        let $textareas = $(TEXTAREA_SEL).filter(':visible');
         if ($textareas.length === 0) {
             updateStatus('未检测到可见的评价输入框，请确保当前在评价页面。', 'red');
             return;
@@ -516,9 +530,11 @@
         processNextItem(0);
     }
 
-    // 我的评价列表页步骤：点击 .operate 下"评价"按钮（第一条待评价订单）。列表为空 → 结束循环。
+    // 我的评价列表页步骤：点击第一条待评价的"评价"按钮（新版 .rate-btn「去评价」/ 旧版 .operate 下"评价"）。列表为空 → 结束循环。
     function runListStep() {
         autoClickAfter(function() {
+            const $new = $('.wait-rate-card .rate-btn').filter(':visible');
+            if ($new.length) return $new.first();
             let $btn = $('.operate').find('a, button, span').filter(':visible').filter(function() {
                 return $(this).clone().children().remove().end().text().trim() === '评价';
             });
@@ -553,11 +569,21 @@
 
         if (path.indexOf('/saveCommentSuccess') !== -1) {
             currentStep = successReturnStep;
-        } else if (path.indexOf('/myJdcomment.action') !== -1) {
+        } else if (path.indexOf('/myJdcomment.action') !== -1 || path.indexOf('/pc-static/center') !== -1) {
             currentStep = runListStep;
         } else {
-            // orderVoucher 评价页
+            // orderVoucher / 新版 publish 评价页
             currentStep = startReviewProcess;
+        }
+
+        // 新版发布成功不跳页，而是同 URL 内渲染完成态（.rate-finish-return「返回待评价列表」），故轮询切到成功页步骤
+        if (path.indexOf('/pc-static/publish') !== -1) {
+            const iv = setInterval(function() {
+                if (!$('.rate-finish-return').length) return;
+                clearInterval(iv);
+                currentStep = successReturnStep;
+                if (running) successReturnStep();
+            }, 500);
         }
 
         if (running) {

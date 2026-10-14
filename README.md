@@ -1,6 +1,6 @@
 # 京东自动评价（大模型版 · 全自动闭环）
 
-一个基于 [Tampermonkey](https://www.tampermonkey.net/) 的油猴脚本：在京东「我的评价」页面，用大模型为每个待评商品生成拟真评价、自动打五星、自动抓取该商品的买家晒单图随机配图上传，再自动发表，并在「评价列表 → 评价页 → 成功页 → 返回列表」之间循环，直到待评列表清空。整个流程由**一个「开始 / 暂停」按钮**控制。
+一个基于 [Tampermonkey](https://www.tampermonkey.net/) 的油猴脚本：在京东评价页面（新版「评价中心」与旧版「我的评价」均支持），用大模型为每个待评商品生成拟真评价、自动打五星、自动抓取该商品的买家晒单图随机配图上传，再自动发表，并在「评价列表 → 评价页 → 成功页 → 返回列表」之间单标签页循环，直到待评列表清空。整个流程由**一个「开始 / 暂停」按钮**控制。
 
 **📦 一键安装：[GreasyFork](https://greasyfork.org/zh-CN/scripts/580937)**（已安装 Tampermonkey 后点击「安装此脚本」即可）
 
@@ -18,6 +18,7 @@
 - [工作原理](#工作原理)
 - [页面 / DOM 依赖](#页面--dom-依赖)
 - [已知限制与风险](#已知限制与风险)
+- [常见问题](#常见问题)
 - [版本历史](#版本历史)
 - [来源与许可](#来源与许可)
 - [免责声明](#免责声明)
@@ -26,10 +27,11 @@
 
 ## 功能特性
 
-- **大模型生成评价**：按商品全称推断品类，生成 60–100 字、针对该品类特性的拟真评价（兼容 OpenAI 格式接口：DeepSeek / OpenAI / 智谱 GLM 等）。失败自动填兜底评价。
-- **自动五星**：统一打五星好评。
-- **自动配图**（v8 新增）：按 skuId 调用京东同域晒单图接口，随机取 N 张买家秀照片，下载后注入上传组件，绕过系统文件选择框。
-- **全自动闭环**：评价 → 配图 → 发表 → 返回列表 → 进入下一单，循环至列表清空。
+- **大模型生成评价**：按商品全称推断品类，生成 60–100 字、针对该品类特性的拟真评价（兼容 OpenAI 格式接口：DeepSeek / OpenAI / 智谱 GLM 等）。生成失败不兜底，直接暂停并在浮窗显示报错原因。
+- **自动五星**：统一打五星好评（新版评价页默认已是五星）。
+- **自动配图**（v8 新增）：按 skuId 调用京东晒单图接口，随机取 N 张买家秀照片，下载后注入上传组件，绕过系统文件选择框。
+- **全自动闭环**：评价 → 配图 → 发表 → 返回列表 → 进入下一单，循环至列表清空；全程在同一个标签页内完成，不累积标签页。
+- **新旧版页面通用**（v9）：新版评价中心 `comment.m.jd.com/pc-static` 与旧版 `club.jd.com/myJdcomments` 均可运行。
 - **开始 / 暂停**：单按钮两态，所有页面通用。暂停在「步骤边界」生效（每条评价之间、每次跳转点击之前），点「开始」从断点继续。循环状态跨页面跳转持久化（`localStorage`）。
 - **安全降级**：配图任意环节异常都跳过配图直接发表，不阻断闭环；上传完成检测带超时兜底，绝不卡死。
 
@@ -39,21 +41,27 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  myJdcomment.action（我的评价列表）                           │
-│      点「开始」/ 循环中自动 → 点击第一条订单的「评价」          │
+│  评价列表页                                                   │
+│    新版 comment.m.jd.com/pc-static/center（按商品列出）        │
+│    旧版 club.jd.com/myJdcomments/myJdcomment.action（按订单）  │
+│  点「开始」/ 循环中自动 → 点第一条「去评价」（旧版「评价」）     │
 └───────────────┬─────────────────────────────────────────────┘
                 ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  orderVoucher.action?ruleid=xxx（评价页）                     │
-│   1. 逐商品调大模型生成评价并回填                              │
+│  评价页                                                       │
+│    新版 /pc-static/publish?orderId=&skuId=（单商品）           │
+│    旧版 orderVoucher.action?ruleid=xxx（整单多商品）           │
+│   1. 逐商品调大模型生成评价并回填（失败即暂停）                 │
 │   2. 统一打五星                                               │
 │   3. 自动配图：抓晒单图 → 随机取 N 张 → 注入上传              │
-│   4. 等上传完成 → 点「发表」                                   │
+│   4. 等上传完成 → 点「发布」（旧版「发表」）                   │
 └───────────────┬─────────────────────────────────────────────┘
                 ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  saveCommentSuccess.action（成功页）                          │
-│      自动点击「返回待评价列表 >」                              │
+│  成功页                                                       │
+│    新版：评价页内渲染的完成态（URL 不变）                       │
+│    旧版 saveCommentSuccess.action                              │
+│  自动点击「返回待评价列表」                                     │
 └───────────────┬─────────────────────────────────────────────┘
                 ▼
           回到列表页，循环；列表为空 → 自动停止
@@ -65,12 +73,12 @@
 
 1. 浏览器安装 [Tampermonkey](https://www.tampermonkey.net/) 扩展。
 2. 安装脚本（任选其一）：
-   - **方式 A（推荐）**：打开 [GreasyFork 脚本页](https://greasyfork.org/zh-CN/scripts/580936) → 点「**安装此脚本**」，后续 GreasyFork 自动推送更新。
+   - **方式 A（推荐）**：打开 [GreasyFork 脚本页](https://greasyfork.org/zh-CN/scripts/580937) → 点「**安装此脚本**」，后续 GreasyFork 自动推送更新。
      > GreasyFork 已接入本仓库 `main` 分支的自动同步：每次 push 经 GitHub Webhook 触发，GreasyFork 自动拉取最新脚本。
    - **方式 B**：打开 Tampermonkey → **管理面板 → 实用工具 → 导入**，选择本仓库的 `jd-auto-review.user.js`；或新建脚本把全文粘贴保存。
 3. 安装后**务必先填配置**（至少 `API_KEY`，见[配置说明](#配置说明)），再确认脚本已启用。
 
-> 脚本通过 `@require` 引入 jQuery，`@grant GM_xmlhttpRequest` 用于跨域抓图，`@connect` 已声明所需图床域名。首次跨域抓图时 Tampermonkey 可能弹窗询问是否允许访问 `*.360buyimg.com`，选择「总是允许」。
+> 脚本通过 `@require` 引入 jQuery；`@grant GM_xmlhttpRequest` 用于请求大模型接口与跨域抓图，`@connect` 已声明所需域名；`@grant unsafeWindow` 用于在自动点击期间接管页面的 `window.open`（保证单标签页跳转）。首次跨域请求时 Tampermonkey 可能弹窗询问是否允许访问 `*.360buyimg.com` 或你的大模型接口域名，选择「总是允许」。
 
 ---
 
@@ -102,18 +110,18 @@
 
 ### 运行
 
-1. 打开 **我的评价**：`https://club.jd.com/myJdcomments/myJdcomment.action`。
+1. 打开 **评价中心**（新版，推荐）：`https://comment.m.jd.com/pc-static/center`；旧版 **我的评价** `https://club.jd.com/myJdcomments/myJdcomment.action` 仍兼容。
 2. 页面右侧出现「🤖 AI 自动评价助手」浮窗，点击 **开始**。
 3. 脚本随即自动执行闭环，全程无需干预：
 
    | 阶段 | 页面 | 脚本动作 |
    |------|------|----------|
-   | ① 进单 | 评价列表页 | 点击第一条待评订单的「评价」，进入评价页 |
-   | ② 写评价 | 评价页 | 逐个商品调大模型生成评价并回填（失败用兜底文案） |
+   | ① 进单 | 评价列表页 | 点击第一条待评商品的「去评价」（旧版为订单的「评价」），在本标签页进入评价页 |
+   | ② 写评价 | 评价页 | 逐个商品调大模型生成评价并回填（失败即暂停并显示原因，点「开始」重试） |
    | ③ 打星 | 评价页 | 统一打五星 |
    | ④ 配图 | 评价页 | 按 sku 抓该商品买家晒单图，随机取 N 张上传（`ENABLE_IMAGE=false` 可关闭） |
-   | ⑤ 发表 | 评价页 | 等图片上传完成后点「发表」 |
-   | ⑥ 返回 | 成功页 | 点「返回待评价列表 >」回到列表页 |
+   | ⑤ 发表 | 评价页 | 等图片上传完成后点「发布」（旧版「发表」） |
+   | ⑥ 返回 | 成功页 | 点「返回待评价列表」回到列表页 |
    | ↻ 循环 | — | 回到 ①，处理下一单 |
 
 4. **待评列表清空后自动停止**，浮窗提示「循环结束」，按钮复位为「开始」。
@@ -131,21 +139,34 @@
 ## 工作原理
 
 ### 1. 评价生成
-逐个可见商品（`.f-textarea textarea`）取商品名（`.p-name`），调用 `API_URL` 生成评价并回填，触发 `input`/`change` 事件让京东识别。
+逐个可见商品的输入框（旧版 `.f-textarea textarea` / 新版 `textarea.rate-comment-content-textarea`）取商品名（旧版 `.p-name` / 新版 `.rate-comment-goods-title`），调用 `API_URL` 生成评价，经原生 value setter 回填并触发 `input`/`change` 事件让页面识别。生成失败（接口报错、超时、内容过短）不兜底，直接暂停并在浮窗显示原因，点「开始」从当前商品重试。
 
 ### 2. 自动配图（关键设计）
-- **图源**：不抓商品详情页（详情页对自动化访问有风控、且规格/晒单区多为 JS 异步渲染）。改用与评价页**同域**的晒单图接口：
+- **图源**：不抓商品详情页（详情页对自动化访问有风控、且规格/晒单区多为 JS 异步渲染）。改用 club.jd.com 的晒单图接口（旧版评价页同域；新版 `comment.m.jd.com` 下跨域，但接口放行 CORS，可直接 `fetch`）：
   ```
   https://club.jd.com/discussion/getProductPageImageCommentList.action?productId=<sku>&isShadowSku=0&page=1&pageSize=10
   ```
-  返回 JSON，`imgComments.imgList[].imageUrl` 即买家晒单图（`*.360buyimg.com/shaidan/...jpg`）。同域、无风控、结构化。
-- **skuId 来源**：评价页 `.p-name a` 的 href（`//item.jd.com/<sku>.html`）。
-- **上传**：`.btn-upload` 底层是 **plupload（html5 runtime）** 的原生 `<input type="file" multiple>`。脚本用 `GM_xmlhttpRequest` 把图片抓成 `Blob` → 构造 `File` → 经 `DataTransfer` 写入 `input.files` → 派发 `change` 事件触发 plupload 上传，**绕过系统文件选择框**。
+  返回 JSON，`imgComments.imgList[].imageUrl` 即买家晒单图（`*.360buyimg.com/shaidan/...jpg`）。无风控、结构化。
+- **skuId 来源**：旧版取评价页 `.p-name a` 的 href（`//item.jd.com/<sku>.html`）；新版取评价页 URL 参数 `skuId`。
+- **重编码为 JPEG**：360buyimg CDN 对 `.jpg` 晒单图常按内容协商返回 webp 字节，京东上传按文件头校验会拒收。脚本经 canvas 重编码为真 JPEG（白底、最长边限 1920px）后再上传。
+- **上传**：旧版 `.btn-upload` 底层是 **plupload（html5 runtime）** 的原生 `<input type="file" multiple>`，新版是原生 `input.uploadAddInput`。脚本用 `GM_xmlhttpRequest` 把图片抓成 `Blob` → 重编码为 JPEG `File` → 经 `DataTransfer` 写入 `input.files` → 派发 `change` 事件触发上传，**绕过系统文件选择框**。
 - **sku ↔ input 映射**：单商品单直接用唯一 input；多商品单按 `.btn-upload`（`#image-upload-<sku>`）与各 input 的几何重叠定位。
 
-### 3. 开始 / 暂停状态机
+### 3. 新版评价中心（comment.m.jd.com）适配要点
+- **列表按商品粒度**：每个待评商品一个「去评价」（`.wait-rate-card .rate-btn`），评价页 `/pc-static/publish?orderId=&skuId=` 每页只有一个商品，sku 直接取 URL 的 `skuId`。
+- **「去评价」原本 `window.open` 新标签**：脚本自动点击没有用户手势会被弹窗拦截，且每单多开一页。复用 v8.6 的单标签导航：自动点击期间临时接管页面的 `window.open` 改为本页跳转。注意必须改 `unsafeWindow.open`（需 `@grant unsafeWindow`），有 `@grant` 时脚本里的 `window` 是沙箱对象，改它拦不到页面自己的调用。
+- **React 受控输入框**：jQuery `.val()` 赋值会被 React 值追踪吞掉，回填改用 `HTMLTextAreaElement` 原生 value setter 再派发 `input`。
+- **星级默认全五星**，无需点击。
+- **上传**：原生 `input.uploadAddInput`，注入后立即传到 `pic.jd.com`；上传中每张图带「上传中...」遮罩 `.filePreviewStateMask`，遮罩消失即完成。
+- **发布成功不跳页**：同 URL 内渲染完成态，脚本轮询 `.rate-finish-return`（「返回待评价列表」）后切到返回步骤。
+
+### 4. 开始 / 暂停状态机
 - `running`（`localStorage` 持久化）：循环是否激活，决定按钮显示「暂停」还是「开始」，并驱动各页面加载后自动续跑。
 - 暂停永远停在「步骤边界」（导航点击之前 / 每条评价之间），不会停在跨页跳转的中间态，故断点续作只需内存变量（`resumeAction`），无需持久化。
+- `localStorage` 按域名隔离：新版（`comment.m.jd.com`）与旧版（`club.jd.com`）的循环状态互不影响。
+
+### 5. 单标签页导航（v8.6）
+自动点击前，把目标元素祖先链上 `<a>`/`<form>` 的 `target` 改为 `_self`，并在点击期间临时把页面的 `window.open` 改为本页跳转（点击结束即还原），使整条闭环在同一个标签页内完成。
 
 ---
 
@@ -162,6 +183,12 @@
 | 评价页 | `.btn-upload`（`#image-upload-<sku>`）、`input[type=file]`（plupload html5） | 配图上传 |
 | 评价页 | 文案「发表」的 `a.btn-submit` | 发表 |
 | 成功页 `saveCommentSuccess.action` | 文案含「返回待评价列表」的元素 | 返回列表 |
+| 新版列表页 `comment.m.jd.com/pc-static/center` | `.wait-rate-card .rate-btn`（「去评价」，原为 `window.open`） | 进入下一单 |
+| 新版评价页 `/pc-static/publish?orderId=&skuId=` | `textarea.rate-comment-content-textarea`（React 受控） | 评价输入框 |
+| 新版评价页 | `.rate-comment-goods-title` / URL 参数 `skuId` | 商品名 / 取 skuId |
+| 新版评价页 | `input.uploadAddInput`、`.filePreviewBox`、`.filePreviewStateMask`（上传中遮罩） | 配图上传 / 完成检测 |
+| 新版评价页 | `.rate-publish-submit-button`（「发布」） | 发表 |
+| 新版评价页（成功态） | `.rate-finish-return`（「返回待评价列表」） | 返回列表 |
 | 配图接口 | `getProductPageImageCommentList.action?productId=<sku>` | 取晒单图 |
 
 ---
@@ -170,7 +197,8 @@
 
 - **详情页风控**：直接自动访问 `item.jd.com` 会被风控拦截（`pc-frequent-pro` 403）。本脚本因此改用同域晒单接口取图，**不访问详情页**。
 - **多商品订单的 sku↔input 映射**：单商品单已验证；多商品单按几何重叠匹配，尚未充分验证，首次遇到请留意是否配错图。
-- **上传完成检测**：靠检测已上传缩略图（`img[src*="imageUpload"]`）计数，若选择器未匹配上，会等满 `UPLOAD_WAIT_TIMEOUT` 再发表（图大概率已传完），不会误发空图但会偏慢。
+- **上传完成检测**：旧版靠已上传缩略图（`img[src*="imageUpload"]`）计数，新版靠图片数减去「上传中...」遮罩数。若选择器未匹配上，会等满 `UPLOAD_WAIT_TIMEOUT` 再发表（图大概率已传完），不会误发空图但会偏慢。
+- **新版列表异步渲染**：新版列表页数据加载后才渲染，网络很慢时若 `AUTO_CLICK_DELAY` 倒计时结束仍未出现「去评价」，会误判为列表已空而停止。不会误操作，再点「开始」即可；常遇到可调大 `AUTO_CLICK_DELAY`。
 - **试用装 / 赠品 / 下架品**：可能无晒单图，脚本会跳过配图直接发表。
 - **接口 / DOM 变更**：京东随时可能改版，相关选择器与接口失效时需按上表更新。
 - **合规与账号风险**：见免责声明。
@@ -178,10 +206,25 @@
 
 ---
 
+## 常见问题
+
+- **浮窗只有一个「手动生成」按钮，提示「未检测到可见的评价输入框」**：装的是上游原脚本（GreasyFork 570776），不是本脚本。它只在单个评价页运行、不支持列表循环。请在 Tampermonkey 中停用它，从 [GreasyFork 580937](https://greasyfork.org/zh-CN/scripts/580937) 安装本脚本（浮窗为「开始 / 暂停」单按钮）。见 [#8](https://github.com/charmingYouYou/JDAIAutoComment/issues/8)。
+- **点「开始」后提示未配置 `API_KEY`**：在脚本顶部「🛠️ 用户配置区域」填入密钥并保存。
+- **评价生成失败后停住了**：v8.4 起失败不再兜底，浮窗会显示原因（接口报错信息、超时 / 网络错误、返回内容过短等），排查后点「开始」从当前商品重试。
+- **「去评价」新开了标签页**：确认脚本版本 ≥ 9.0（需要 `@grant unsafeWindow`），旧版本在新版评价中心上接管不到页面的 `window.open`。
+
+---
+
 ## 版本历史
 
 | 版本 | 主要变化 |
 |------|----------|
+| v9.0 | 适配新版评价中心 `comment.m.jd.com/pc-static`（按商品逐个评价、React 受控输入框、发布成功态检测），旧版页面继续兼容；`window.open` 接管改为作用于页面（`unsafeWindow`） |
+| v8.6 | 单标签页导航：跳转前中和 `target="_blank"` 并接管 `window.open`，挂机不再累积标签页 |
+| v8.5 | 元信息补 `@icon` / `@noframes` |
+| v8.4 | AI 生成评价失败不再兜底，改为暂停并显示报错原因 |
+| v8.2 | 配图上传前用 canvas 重编码为真 JPEG，修复格式被拒 |
+| v8.1 | `@connect *` 放行大模型接口域名，修复请求被白名单拒绝 |
 | v8 | 新增自动配图：同域晒单接口取图 + plupload 文件注入上传，串接进发表前 |
 | v7 | 「开始 / 暂停」合并为单按钮两态，统一所有页面；移除独立「恢复」「手动生成」 |
 | v6 | 引入开始 / 暂停 / 恢复三态控制 |
@@ -193,7 +236,7 @@
 ## 来源与许可
 
 - 基础评价生成逻辑改编自 [GreasyFork 上 oscar 的「京东自动评价（大模型版）」](https://greasyfork.org/scripts/570776)。
-- 本仓库为在其上扩展的**个人修改版**（多页面闭环、开始/暂停、自动配图）。原作者保留其权利，本仓库仅供个人使用与学习，不主张额外授权。
+- 本仓库为在其上扩展的**个人修改版**（多页面闭环、开始/暂停、自动配图、新版评价中心适配）。原作者保留其权利，本仓库仅供个人使用与学习，不主张额外授权。
 
 ## 免责声明
 
