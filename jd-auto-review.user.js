@@ -14,6 +14,7 @@
 // @match        https://club.jd.com/myJdcomments/myJdcomment.action*
 // @match        https://comment.m.jd.com/pc-static/center*
 // @match        https://comment.m.jd.com/pc-static/publish*
+// @match        https://comment.m.jd.com/pc-static/deliveryrate*
 // @require      http://libs.baidu.com/jquery/1.11.1/jquery.min.js
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -60,6 +61,8 @@
     // 旧版 club.jd.com 与新版 comment.m.jd.com（每页仅一个商品）评价页的输入框 / 商品名
     const TEXTAREA_SEL = '.f-textarea textarea, textarea.rate-comment-content-textarea';
     const NAME_SEL = '.p-name, .rate-comment-goods-title';
+    // 新版发布成功态的返回按钮：商品「返回待评价列表」/ 外卖「返回评价中心」（外卖页类名带 CSS Modules 哈希，用子串匹配）
+    const FINISH_RETURN_SEL = '.rate-finish-return, [class*="finishReturn"]';
     let running = false;
     let currentStep = null;
     let resumeAction = null;
@@ -267,9 +270,9 @@
         });
     }
 
-    // 解析"发表"按钮：新版为「发布」按钮；旧版优先精确文案"发表"，找不到再退化为包含"发表"（兼容"发表评价"）。该页发表按钮唯一，取 first。
+    // 解析"发表"按钮：新版为「发布」按钮（商品 / 外卖）；旧版优先精确文案"发表"，找不到再退化为包含"发表"（兼容"发表评价"）。该页发表按钮唯一，取 first。
     function resolvePublishBtn() {
-        let $btn = $('.rate-publish-submit-button').filter(':visible');
+        let $btn = $('.rate-publish-submit-button, [class*="submitBtn"]').filter(':visible');
         if ($btn.length === 0) $btn = $clickableByText('发表', false);
         if ($btn.length === 0) $btn = $clickableByText('发表', true);
         return $btn.first();
@@ -530,6 +533,40 @@
         processNextItem(0);
     }
 
+    // 京东外卖评价页（/pc-static/deliveryrate）步骤：商家满意值默认为空，打 5 星后口味/包装随之满星，并展开菜品与输入框；
+    // 骑手须选「满意」才能发布。再按店名 + 菜品生成评价并发表。外卖没有商品 sku、取不到晒单图，故不配图。
+    function startDeliveryReview() {
+        if (!checkConfig()) return;
+        const star5 = document.querySelector('[aria-label="满意值：5星"]');
+        if (!star5) {
+            updateStatus('未检测到外卖评价星级，请确保当前在外卖评价页面。', 'red');
+            return;
+        }
+        star5.click();
+        const rider = document.querySelector('[aria-label="满意"]');
+        if (rider) rider.click();
+
+        // 菜品列表在打星后才渲染，稍等再取
+        setTimeout(function() {
+            const shop = $('[class*="shopName"]').first().text().trim();
+            const dishes = $('[class*="skuName"]').map(function() { return $(this).text().trim(); }).get().join('、');
+            updateStatus('正在生成外卖评价：' + shop, 'blue');
+            generateProductReview(shop + ' 的外卖' + (dishes ? '：' + dishes : ''),
+                function(review) {
+                    // 输入框是 contenteditable 富文本，用 insertText 模拟真实输入，React 才能拿到内容
+                    document.querySelector('[contenteditable="true"]').focus();
+                    document.execCommand('insertText', false, review);
+                    publishStep();
+                },
+                function(errMsg) {
+                    setRunning(false);
+                    resumeAction = startDeliveryReview;
+                    updateStatus(`❌ 外卖评价生成失败：${errMsg}。已暂停，排查后点「开始」重试。`, 'red');
+                }
+            );
+        }, 1000);
+    }
+
     // 我的评价列表页步骤：点击第一条待评价的"评价"按钮（新版 .rate-btn「去评价」/ 旧版 .operate 下"评价"）。列表为空 → 结束循环。
     function runListStep() {
         autoClickAfter(function() {
@@ -552,10 +589,11 @@
         });
     }
 
-    // 评价成功页步骤：点击"返回待评价列表 >"
+    // 评价成功页步骤：点击"返回待评价列表 >"（新版外卖为「返回评价中心」）
     function successReturnStep() {
         autoClickAfter(function() {
-            return $clickableByText('返回待评价列表', true).first();
+            const $finish = $(FINISH_RETURN_SEL).filter(':visible');
+            return $finish.length ? $finish.first() : $clickableByText('返回待评价列表', true).first();
         }, '返回待评价列表');
     }
 
@@ -571,15 +609,17 @@
             currentStep = successReturnStep;
         } else if (path.indexOf('/myJdcomment.action') !== -1 || path.indexOf('/pc-static/center') !== -1) {
             currentStep = runListStep;
+        } else if (path.indexOf('/pc-static/deliveryrate') !== -1) {
+            currentStep = startDeliveryReview;
         } else {
             // orderVoucher / 新版 publish 评价页
             currentStep = startReviewProcess;
         }
 
-        // 新版发布成功不跳页，而是同 URL 内渲染完成态（.rate-finish-return「返回待评价列表」），故轮询切到成功页步骤
-        if (path.indexOf('/pc-static/publish') !== -1) {
+        // 新版发布成功不跳页，而是同 URL 内渲染完成态（含「返回待评价列表 / 返回评价中心」按钮），故轮询切到成功页步骤
+        if (/\/pc-static\/(publish|deliveryrate)/.test(path)) {
             const iv = setInterval(function() {
-                if (!$('.rate-finish-return').length) return;
+                if (!$(FINISH_RETURN_SEL).length) return;
                 clearInterval(iv);
                 currentStep = successReturnStep;
                 if (running) successReturnStep();
@@ -588,10 +628,10 @@
 
         if (running) {
             // 循环中：自动执行本页步骤。评价页留 2.5s 等 DOM 就绪，其余步骤自带倒计时。
-            if (currentStep === startReviewProcess) {
+            if (currentStep === startReviewProcess || currentStep === startDeliveryReview) {
                 if (!checkConfig()) return;
                 updateStatus('循环中，2秒后开始本单评价...', 'blue');
-                setTimeout(function() { if (running) startReviewProcess(); }, 2500);
+                setTimeout(function() { if (running) currentStep(); }, 2500);
             } else {
                 currentStep();
             }
