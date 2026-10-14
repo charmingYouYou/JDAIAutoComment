@@ -31,7 +31,7 @@
 - **自动五星**：统一打五星好评（新版评价页默认已是五星）。
 - **自动配图**（v8 新增）：按 skuId 调用京东晒单图接口，随机取 N 张买家秀照片，下载后注入上传组件，绕过系统文件选择框。
 - **全自动闭环**：评价 → 配图 → 发表 → 返回列表 → 进入下一单，循环至列表清空；全程在同一个标签页内完成，不累积标签页。
-- **新旧版页面通用**（v9）：新版评价中心 `comment.m.jd.com/pc-static` 与旧版 `club.jd.com/myJdcomments` 均可运行。
+- **新旧版页面通用**（v9）：新版评价中心 `comment.m.jd.com/pc-static` 与旧版 `club.jd.com/myJdcomments` 均可运行；新版列表中的**京东外卖**订单也会自动评价（商家 5 星、骑手满意）。
 - **开始 / 暂停**：单按钮两态，所有页面通用。暂停在「步骤边界」生效（每条评价之间、每次跳转点击之前），点「开始」从断点继续。循环状态跨页面跳转持久化（`localStorage`）。
 - **安全降级**：配图任意环节异常都跳过配图直接发表，不阻断闭环；上传完成检测带超时兜底，绝不卡死。
 
@@ -50,6 +50,7 @@
 ┌─────────────────────────────────────────────────────────────┐
 │  评价页                                                       │
 │    新版 /pc-static/publish?orderId=&skuId=（单商品）           │
+│    新版外卖 /pc-static/deliveryrate?orderId=（商家 + 骑手）     │
 │    旧版 orderVoucher.action?ruleid=xxx（整单多商品）           │
 │   1. 逐商品调大模型生成评价并回填（失败即暂停）                 │
 │   2. 统一打五星                                               │
@@ -158,7 +159,15 @@
 - **React 受控输入框**：jQuery `.val()` 赋值会被 React 值追踪吞掉，回填改用 `HTMLTextAreaElement` 原生 value setter 再派发 `input`。
 - **星级默认全五星**，无需点击。
 - **上传**：原生 `input.uploadAddInput`，注入后立即传到 `pic.jd.com`；上传中每张图带「上传中...」遮罩 `.filePreviewStateMask`，遮罩消失即完成。
-- **发布成功不跳页**：同 URL 内渲染完成态，脚本轮询 `.rate-finish-return`（「返回待评价列表」）后切到返回步骤。
+- **发布成功不跳页**：同 URL 内渲染完成态，脚本轮询 `.rate-finish-return`（「返回待评价列表」）/ 外卖页 `[class*="finishReturn"]`（「返回评价中心」）后切到返回步骤。
+- **京东外卖**（列表里的外卖订单点「去评价」进入 `/pc-static/deliveryrate?orderId=`）：
+  - 商家「满意值」星级**默认为空**，须点 `[aria-label="满意值：5星"]`；打星后口味 / 包装自动满星，并展开菜品列表与输入框。
+  - 骑手须选 `[aria-label="满意"]`，否则「发布」按钮置灰（显示「请评价骑手」）。
+  - 输入框是 contenteditable 富文本（不是 textarea），用 `document.execCommand('insertText')` 模拟真实输入，React 才能拿到内容。
+  - 评价按「店名 的外卖：菜品1、菜品2」交给大模型生成。
+  - 外卖没有商品 sku、取不到买家晒单图，**不自动配图**。
+  - 页面类名是带哈希的 CSS Modules，故星级 / 骑手按 `aria-label` 定位，发布按钮 / 返回按钮按类名子串（`submitBtn` / `finishReturn`）定位。
+  - 已核对提交编码：选项 `A1` 为最高分（5 星 / 满意），`A5` 为最低。
 
 ### 4. 开始 / 暂停状态机
 - `running`（`localStorage` 持久化）：循环是否激活，决定按钮显示「暂停」还是「开始」，并驱动各页面加载后自动续跑。
@@ -189,6 +198,9 @@
 | 新版评价页 | `input.uploadAddInput`、`.filePreviewBox`、`.filePreviewStateMask`（上传中遮罩） | 配图上传 / 完成检测 |
 | 新版评价页 | `.rate-publish-submit-button`（「发布」） | 发表 |
 | 新版评价页（成功态） | `.rate-finish-return`（「返回待评价列表」） | 返回列表 |
+| 新版外卖评价页 `/pc-static/deliveryrate?orderId=` | `[aria-label="满意值：5星"]`、`[aria-label="满意"]`（骑手） | 商家 5 星 / 骑手满意 |
+| 新版外卖评价页 | `[class*="shopName"]`、`[class*="skuName"]`、`[contenteditable="true"]` | 店名 / 菜品名 / 评价输入框 |
+| 新版外卖评价页 | `[class*="submitBtn"]`（「发布」）、成功态 `[class*="finishReturn"]`（「返回评价中心」） | 发表 / 返回列表 |
 | 配图接口 | `getProductPageImageCommentList.action?productId=<sku>` | 取晒单图 |
 
 ---
@@ -200,6 +212,7 @@
 - **上传完成检测**：旧版靠已上传缩略图（`img[src*="imageUpload"]`）计数，新版靠图片数减去「上传中...」遮罩数。若选择器未匹配上，会等满 `UPLOAD_WAIT_TIMEOUT` 再发表（图大概率已传完），不会误发空图但会偏慢。
 - **新版列表异步渲染**：新版列表页数据加载后才渲染，网络很慢时若 `AUTO_CLICK_DELAY` 倒计时结束仍未出现「去评价」，会误判为列表已空而停止。不会误操作，再点「开始」即可；常遇到可调大 `AUTO_CLICK_DELAY`。
 - **试用装 / 赠品 / 下架品**：可能无晒单图，脚本会跳过配图直接发表。
+- **京东外卖不配图**：外卖页没有商品 sku，取不到买家晒单图，只发文字评价（拿不到「1 图」的额外京豆）。
 - **接口 / DOM 变更**：京东随时可能改版，相关选择器与接口失效时需按上表更新。
 - **合规与账号风险**：见免责声明。
 - **标签页**：v8.6 起整条闭环在单个标签页内完成（跳转前中和 `target="_blank"`、接管 `window.open`），挂机批量评价不再累积标签页。但历史运行已堆出的旧标签页需手动关闭一次——浏览器禁止脚本关闭非脚本打开的标签页，无法代为回收。
@@ -219,7 +232,7 @@
 
 | 版本 | 主要变化 |
 |------|----------|
-| v9.0 | 适配新版评价中心 `comment.m.jd.com/pc-static`（按商品逐个评价、React 受控输入框、发布成功态检测），旧版页面继续兼容；`window.open` 接管改为作用于页面（`unsafeWindow`） |
+| v9.0 | 适配新版评价中心 `comment.m.jd.com/pc-static`（按商品逐个评价、React 受控输入框、发布成功态检测），支持京东外卖订单评价，旧版页面继续兼容；`window.open` 接管改为作用于页面（`unsafeWindow`） |
 | v8.6 | 单标签页导航：跳转前中和 `target="_blank"` 并接管 `window.open`，挂机不再累积标签页 |
 | v8.5 | 元信息补 `@icon` / `@noframes` |
 | v8.4 | AI 生成评价失败不再兜底，改为暂停并显示报错原因 |
