@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         京东自动评价（大模型版·全自动闭环）
 // @namespace    https://github.com/charmingYouYou/JDAIAutoComment
-// @version      9.1
-// @description  一个「开始/暂停」按钮控制的全自动评价闭环：评价→自动配图（抓商品晒单图随机上传）→发表→返回列表→进入下一单，循环至列表清空。开始=从当前步骤继续；暂停=当前步骤完成后停止。支持接入各类大模型（DeepSeek/OpenAI/GLM等）。
+// @version      9.2
+// @description  一个「开始/暂停」按钮控制的全自动评价闭环：评价→自动配图（抓商品晒单图随机上传）→发表→返回列表→进入下一单，循环至列表清空。面板可选「评价 / 追评」模式，新旧版评价中心均支持。开始=从当前步骤继续；暂停=当前步骤完成后停止。支持接入各类大模型（DeepSeek/OpenAI/GLM等）。
 // @author       charmingYouYou
 // @license      MIT
 // @homepageURL  https://github.com/charmingYouYou/JDAIAutoComment
@@ -12,6 +12,7 @@
 // @match        https://club.jd.com/myJdcomments/orderVoucher*
 // @match        https://club.jd.com/myJdcomments/saveCommentSuccess*
 // @match        https://club.jd.com/myJdcomments/myJdcomment.action*
+// @match        https://club.jd.com/afterComments/*
 // @match        https://comment.m.jd.com/pc-static/center*
 // @match        https://comment.m.jd.com/pc-static/publish*
 // @match        https://comment.m.jd.com/pc-static/deliveryrate*
@@ -63,12 +64,20 @@
     const NAME_SEL = '.p-name, .rate-comment-goods-title';
     // 新版发布成功态的返回按钮：商品「返回待评价列表」/ 外卖「返回评价中心」（外卖页类名带 CSS Modules 哈希，用子串匹配）
     const FINISH_RETURN_SEL = '.rate-finish-return, [class*="finishReturn"]';
+    // 本页是追评表单 / 追评成功页（旧版 afterComments/、新版 publish?commentType=2）：决定写法，与面板模式无关
+    const IS_APPEND = /\/afterComments\/|commentType=2/.test(location.href);
+    // 面板所选模式（评价 / 追评）：决定列表页取哪个列表。与 LOOP_KEY 一样落 localStorage、按域名隔离
+    const MODE_KEY = 'JD_AI_MODE';
     let running = false;
     let currentStep = null;
     let resumeAction = null;
+    let listTouched = false; // 本页是否跑过列表步骤：跑过则改模式需刷新，清掉按旧模式在途的倒计时 / 滚动轮询
 
     function isRunning() {
         try { return localStorage.getItem(LOOP_KEY) === '1'; } catch (e) { return false; }
+    }
+    function isAppendMode() {
+        try { return localStorage.getItem(MODE_KEY) === 'append'; } catch (e) { return false; }
     }
     function setRunning(v) {
         running = v;
@@ -91,6 +100,10 @@
         const uiHTML = `
             <div id="ai-auto-review-ui" style="position: fixed; top: 30%; right: 20px; width: 260px; background: #fff; border: 2px solid #e4393c; border-radius: 8px; padding: 15px; z-index: 99999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-family: 'Microsoft YaHei', sans-serif;">
                 <h3 style="margin: 0 0 15px 0; font-size: 16px; color: #e4393c; text-align: center; border-bottom: 1px solid #eee; padding-bottom: 10px;">🤖 AI 自动评价助手</h3>
+                <div id="ai-mode" style="display: flex; justify-content: center; gap: 24px; margin-bottom: 10px; font-size: 13px; color: #333;">
+                    <label style="cursor: pointer;"><input type="radio" name="ai-mode" value="review"> 评价</label>
+                    <label style="cursor: pointer;"><input type="radio" name="ai-mode" value="append"> 追评</label>
+                </div>
                 <button id="ai-btn-toggle" style="width: 100%; padding: 10px; background: #28a745; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; margin-bottom: 10px;">开始</button>
                 <div id="ai-status" style="font-size: 12px; color: #666; min-height: 40px; background: #f8f8f8; padding: 8px; border-radius: 4px; word-wrap: break-word; line-height: 1.5;">状态：等待页面加载...</div>
             </div>
@@ -114,6 +127,13 @@
             }
         });
 
+        // 模式只在停止 / 暂停时可改（运行中由 renderToggleBtn 禁用）
+        $('#ai-mode input[value="' + (isAppendMode() ? 'append' : 'review') + '"]').prop('checked', true);
+        $('#ai-mode input').change(function() {
+            try { localStorage.setItem(MODE_KEY, this.value); } catch (e) {}
+            if (listTouched) location.reload();
+        });
+
         renderToggleBtn();
     }
 
@@ -121,6 +141,7 @@
     function renderToggleBtn() {
         const $b = $('#ai-btn-toggle');
         if (!$b.length) return;
+        $('#ai-mode input').prop('disabled', running);
         if (running) {
             $b.text('暂停').css('background', '#f0ad4e');
         } else {
@@ -230,6 +251,9 @@
     // 4. 请求 大模型 API
     function generateProductReview(productName, successCallback, errorCallback) {
         console.log('productName', productName);
+        const task = IS_APPEND
+            ? "这个商品我已经用了一段时间，现在写追评，商品全称是:【" + productName + "】。\n\n请写一段60到100字的追评，写用了一段时间后的真实感受（如耐用度、效果是否稳定、会不会回购），严格遵守以下纪律："
+            : "我刚买了商品，商品全称是:【" + productName + "】。\n\n请写一段60到100字的商品评价，严格遵守以下纪律：";
         GM_xmlhttpRequest({
             method: "POST",
             url: API_URL,
@@ -242,7 +266,12 @@
                 messages: [
                     {
                         role: "system",
-                        content: "你是一名真实的网购买家。我刚买了商品，商品全称是:【" + productName + "】。\n\n请写一段60到100字的商品评价，严格遵守以下纪律：\n1. 必须根据名称推断出它具体是什么东西（比如是保鲜膜、垃圾袋还是零食），然后只评价它该有的特定属性（如保鲜膜就评价粘性/厚度/好撕，垃圾袋评价承重/不漏）。\n2. 绝对禁止使用“物流快”、“客服好”、“包装严实”等万能模板废话。\n3. 不要把商品全名抄一遍，用“这款”、“这个”代替。\n4. 字数必须大于60个字。直接输出纯文本正文，绝对不要有任何前缀或提示语。"
+                        content: "你是一名真实的网购买家。"
+                    },
+                    {
+                        // 部分厂商（Claude / Gemini 兼容层等）不接受只有 system 的请求，任务须放在 user 消息里
+                        role: "user",
+                        content: task + "\n1. 必须根据名称推断出它具体是什么东西（比如是保鲜膜、垃圾袋还是零食），然后只评价它该有的特定属性（如保鲜膜就评价粘性/厚度/好撕，垃圾袋评价承重/不漏）。\n2. 绝对禁止使用“物流快”、“客服好”、“包装严实”等万能模板废话。\n3. 不要把商品全名抄一遍，用“这款”、“这个”代替。\n4. 字数必须大于60个字。直接输出纯文本正文，绝对不要有任何前缀或提示语。"
                     }
                 ]
             }),
@@ -428,12 +457,13 @@
     }
 
     // 等待上传完成：已上传图数 ≥ 期望张数；到点即返回，避免卡死。
-    // 旧版已传图为 img[src*=imageUpload]；新版每张图一个 .filePreviewBox，上传中带「上传中...」遮罩 .filePreviewStateMask。
+    // 旧版每张图一个 .thumbnail-item，上传成功才写入 img[originalsrc]（img[src*=imageUpload] 只会命中页头头像）；
+    // 新版每张图一个 .filePreviewBox，上传中带「上传中...」遮罩 .filePreviewStateMask。
     function waitUploads(min, timeout) {
         return new Promise(function(resolve) {
             const start = Date.now();
             const iv = setInterval(function() {
-                const n = document.querySelectorAll('img[src*="imageUpload"], .filePreviewBox').length -
+                const n = document.querySelectorAll('.thumbnail-item img[originalsrc], .filePreviewBox').length -
                           document.querySelectorAll('.filePreviewStateMask').length;
                 if (n >= min || (Date.now() - start) > timeout) { clearInterval(iv); resolve(n); }
             }, 600);
@@ -475,7 +505,7 @@
         let $names = $(NAME_SEL).filter(':visible');
 
         if (index >= $textareas.length) {
-            $('.star5:visible').click(); // 统一打五星
+            if (!IS_APPEND) $('.star5:visible').click(); // 统一打五星；旧版追评页的星级是初评的只读展示，不点
             // 回填完毕：先配图（可选），再发表。两步均含暂停边界。
             if (ENABLE_IMAGE) {
                 updateStatus('✅ 评价已生成并打五星，开始自动配图...', 'green');
@@ -567,13 +597,60 @@
         }, 1000);
     }
 
-    // 我的评价列表页步骤：点击第一条待评价的"评价"按钮（新版 .rate-btn「去评价」/ 旧版 .operate 下"评价"）。列表为空 → 结束循环。
+    // 我的评价列表页步骤：先确保停在面板所选模式对应的列表，再点第一条。
     function runListStep() {
+        listTouched = true;
+        const append = isAppendMode();
+        if (location.hostname === 'club.jd.com') {
+            // 旧版：待评价 sort=0（不带 sort 也是它，首评成功页就返回这里）、待追评 sort=3，不在对应列表就先跳过去
+            const want = append ? '3' : '0';
+            if ((new URLSearchParams(location.search).get('sort') || '0') !== want) {
+                updateStatus('切换到' + (append ? '待追评' : '待评价') + '列表...', 'blue');
+                location.href = '?sort=' + want;
+                return;
+            }
+            clickNextInList(append);
+            return;
+        }
+        // 新版：tab 不进 URL（追评发布后返回总落在「待评价」），按模式切 tab；可追评列表还要滚动加载
+        selectTab(append ? '可追评' : '待评价', function() {
+            if (append) loadAppendList(function() { clickNextInList(true); });
+            else clickNextInList(false);
+        });
+    }
+
+    // 新版评价中心 tab 是 React 异步渲染的：等它出现再切过去。最多等 10s，京东改版找不到 tab 也照常往下走，不卡死首评。
+    function selectTab(name, done, tries) {
+        tries = tries || 0;
+        const $tab = $('.tabs-nav .tab-item:contains("' + name + '")');
+        if (!$tab.length && tries < 20) { setTimeout(function() { selectTab(name, done, tries + 1); }, 500); return; }
+        if ($tab.length && !$tab.hasClass('active')) $tab[0].click();
+        done();
+    }
+
+    // 新版「已评价/可追评」tab：异步渲染、滚动分页（30 条/页）。追评过的商品仍留在列表里、只是没了「写追评」（外卖卡片也没有），追完首屏就得翻页。
+    // 找不到「写追评」就滚到底加载下一页，直到找到或卡片数连续 3 次（约 4.5s）不再增长——给慢网下的首屏 / 翻页留余量。
+    function loadAppendList(done) {
+        updateStatus('加载可追评列表...', 'blue');
+        let last = -1, idle = 0;
+        (function poll() {
+            const n = $('.rated-card').length;
+            idle = n === last ? idle + 1 : 0;
+            if ($('.rated-card .append-btn').length || idle >= 3) { done(); return; }
+            last = n;
+            window.scrollTo(0, document.body.scrollHeight);
+            setTimeout(poll, 1500);
+        })();
+    }
+
+    // 点击列表第一条：新版 .rate-btn「去评价」/ .append-btn「写追评」；旧版 .operate 下「评价」，待追评列表为「追评」。列表为空 → 结束循环。
+    function clickNextInList(append) {
         autoClickAfter(function() {
-            const $new = $('.wait-rate-card .rate-btn').filter(':visible');
+            const $new = $(append ? '.rated-card .append-btn' : '.wait-rate-card .rate-btn').filter(':visible');
             if ($new.length) return $new.first();
+            const want = append ? '追评' : '评价';
             let $btn = $('.operate').find('a, button, span').filter(':visible').filter(function() {
-                return $(this).clone().children().remove().end().text().trim() === '评价';
+                return $(this).clone().children().remove().end().text().trim() === want;
             });
             if ($btn.length === 0) {
                 // 兜底：退化为"去评价"，排除"查看评价/追评"
@@ -585,15 +662,15 @@
             return $btn.first();
         }, '进入下一单评价', AUTO_CLICK_DELAY, function() {
             setRunning(false);
-            updateStatus('🎉 待评价列表已空，循环结束。', 'green');
+            updateStatus('🎉 ' + (append ? '待追评' : '待评价') + '列表已空，循环结束。', 'green');
         });
     }
 
-    // 评价成功页步骤：点击"返回待评价列表 >"（新版外卖为「返回评价中心」）
+    // 评价成功页步骤：点击"返回待评价列表 >"（旧版追评为「返回追评列表」，新版外卖为「返回评价中心」）
     function successReturnStep() {
         autoClickAfter(function() {
             const $finish = $(FINISH_RETURN_SEL).filter(':visible');
-            return $finish.length ? $finish.first() : $clickableByText('返回待评价列表', true).first();
+            return $finish.length ? $finish.first() : $clickableByText(IS_APPEND ? '返回追评列表' : '返回待评价列表', true).first();
         }, '返回待评价列表');
     }
 
@@ -605,14 +682,14 @@
 
         const path = location.pathname;
 
-        if (path.indexOf('/saveCommentSuccess') !== -1) {
+        if (/\/save(After)?CommentSuccess/.test(path)) {
             currentStep = successReturnStep;
         } else if (path.indexOf('/myJdcomment.action') !== -1 || path.indexOf('/pc-static/center') !== -1) {
             currentStep = runListStep;
         } else if (path.indexOf('/pc-static/deliveryrate') !== -1) {
             currentStep = startDeliveryReview;
         } else {
-            // orderVoucher / 新版 publish 评价页
+            // orderVoucher / 旧版追评页 / 新版 publish 评价页（含追评）
             currentStep = startReviewProcess;
         }
 
