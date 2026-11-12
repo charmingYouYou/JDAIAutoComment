@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         京东自动评价（大模型版·全自动闭环）
 // @namespace    https://github.com/charmingYouYou/JDAIAutoComment
-// @version      9.1
-// @description  一个「开始/暂停」按钮控制的全自动评价闭环：评价→自动配图（抓商品晒单图随机上传）→发表→返回列表→进入下一单，循环至列表清空。开始=从当前步骤继续；暂停=当前步骤完成后停止。支持接入各类大模型（DeepSeek/OpenAI/GLM等）。
+// @version      9.2
+// @description  一个「开始/暂停」按钮控制的全自动评价闭环：评价→自动配图（抓商品晒单图随机上传）→发表→返回列表→进入下一单，循环至列表清空。面板可选「评价 / 追评」模式，新旧版评价中心均支持。开始=从当前步骤继续；暂停=当前步骤完成后停止。支持接入各类大模型（DeepSeek/OpenAI/GLM等）。
 // @author       charmingYouYou
 // @license      MIT
 // @homepageURL  https://github.com/charmingYouYou/JDAIAutoComment
